@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Toast, ToastContainer } from '@/components/ui/toast';
 import { SessionOutputViewer } from './SessionOutputViewer';
-import { api } from '@/lib/api';
+import { httpApi as api } from '@/lib/http-api';
 import type { AgentRun } from '@/lib/api';
 
 interface RunningSessionsViewProps {

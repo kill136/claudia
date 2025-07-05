@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import { Circle, FileText, Settings, ExternalLink, BarChart3, Network, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover } from "@/components/ui/popover";
-import { api, type ClaudeVersionStatus } from "@/lib/api";
+import { httpApi as api, type ClaudeVersionStatus } from "@/lib/http-api";
 import { cn } from "@/lib/utils";
 
 interface TopbarProps {

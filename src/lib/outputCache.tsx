@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
-import { api } from './api';
+import { httpApi as api } from './http-api';
 
 // Use the same message interface as AgentExecution for consistency
 export interface ClaudeStreamMessage {

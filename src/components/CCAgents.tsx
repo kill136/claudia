@@ -30,9 +30,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { api, type Agent, type AgentRunWithMetrics } from "@/lib/api";
-import { save, open } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
+import { httpApi as api, type Agent, type AgentRunWithMetrics } from "@/lib/http-api";
 import { cn } from "@/lib/utils";
 import { Toast, ToastContainer } from "@/components/ui/toast";
 import { CreateAgent } from "./CreateAgent";
@@ -191,25 +189,28 @@ export const CCAgents: React.FC<CCAgentsProps> = ({ onBack, className }) => {
 
   const handleExportAgent = async (agent: Agent) => {
     try {
-      // Show native save dialog
-      const filePath = await save({
-        defaultPath: `${agent.name.toLowerCase().replace(/\s+/g, '-')}.claudia.json`,
-        filters: [{
-          name: 'Claudia Agent',
-          extensions: ['claudia.json']
-        }]
-      });
+      // In HTTP mode, we'll export as a download
+      const exportData = {
+        id: agent.id,
+        name: agent.name,
+        icon: agent.icon,
+        system_prompt: agent.system_prompt,
+        model: agent.model,
+        created_at: agent.created_at,
+        updated_at: agent.updated_at
+      };
       
-      if (!filePath) {
-        // User cancelled the dialog
-        return;
-      }
+      const jsonString = JSON.stringify(exportData, null, 2);
+      const blob = new Blob([jsonString], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
       
-      // Export the agent to the selected file
-      await invoke('export_agent_to_file', { 
-        id: agent.id!,
-        filePath 
-      });
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${agent.name.toLowerCase().replace(/\s+/g, '-')}.claudia.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
       
       setToast({ message: `Agent "${agent.name}" exported successfully`, type: "success" });
     } catch (err) {
@@ -220,25 +221,38 @@ export const CCAgents: React.FC<CCAgentsProps> = ({ onBack, className }) => {
 
   const handleImportAgent = async () => {
     try {
-      // Show native open dialog
-      const filePath = await open({
-        multiple: false,
-        filters: [{
-          name: 'Claudia Agent',
-          extensions: ['claudia.json', 'json']
-        }]
-      });
+      // In HTTP mode, we'll use a file input
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json,.claudia.json';
       
-      if (!filePath) {
-        // User cancelled the dialog
-        return;
-      }
+      input.onchange = async (event) => {
+        const file = (event.target as HTMLInputElement).files?.[0];
+        if (!file) return;
+        
+        try {
+          const text = await file.text();
+          const agentData = JSON.parse(text);
+          
+          // Create a new agent with the imported data
+          await api.createAgent(
+            agentData.name,
+            agentData.icon,
+            agentData.system_prompt,
+            agentData.default_task,
+            agentData.model
+          );
+          
+          setToast({ message: "Agent imported successfully", type: "success" });
+          await loadAgents();
+        } catch (err) {
+          console.error("Failed to import agent:", err);
+          const errorMessage = err instanceof Error ? err.message : "Failed to import agent";
+          setToast({ message: errorMessage, type: "error" });
+        }
+      };
       
-      // Import the agent from the selected file
-      await api.importAgentFromFile(filePath as string);
-      
-      setToast({ message: "Agent imported successfully", type: "success" });
-      await loadAgents();
+      input.click();
     } catch (err) {
       console.error("Failed to import agent:", err);
       const errorMessage = err instanceof Error ? err.message : "Failed to import agent";

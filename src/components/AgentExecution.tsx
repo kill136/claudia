@@ -17,14 +17,27 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover } from "@/components/ui/popover";
-import { api, type Agent } from "@/lib/api";
+import { httpApi as api, type Agent } from "@/lib/http-api";
 import { cn } from "@/lib/utils";
-import { open } from "@tauri-apps/plugin-dialog";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+// Web-compatible alternatives to Tauri functions
+const openDirectoryDialog = async (): Promise<string | null> => {
+  // In web mode, use a simple input field or return a default path
+  const path = prompt("Please enter the project path:", "/home/user/project");
+  return path;
+};
+
+const listen = async (eventName: string, callback: (event: any) => void): Promise<() => void> => {
+  // In web mode, return a no-op unlisten function
+  console.log(`Mock: Listening to event ${eventName}`);
+  return () => { console.log(`Mock: Unlistened from ${eventName}`); };
+};
+
+type UnlistenFn = () => void;
 import { StreamMessage } from "./StreamMessage";
 import { ExecutionControlBar } from "./ExecutionControlBar";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { ICON_MAP as AGENT_ICONS } from "./IconPicker";
 
 interface AgentExecutionProps {
   /**
@@ -248,14 +261,10 @@ export const AgentExecution: React.FC<AgentExecutionProps> = ({
 
   const handleSelectPath = async () => {
     try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: "Select Project Directory"
-      });
+      const selected = await openDirectoryDialog();
       
       if (selected) {
-        setProjectPath(selected as string);
+        setProjectPath(selected);
         setError(null); // Clear any previous errors
       }
     } catch (err) {
@@ -278,45 +287,95 @@ export const AgentExecution: React.FC<AgentExecutionProps> = ({
       unlistenRefs.current.forEach(unlisten => unlisten());
       unlistenRefs.current = [];
       
-      // Execute the agent and get the run ID
+            // Execute the agent and get the run ID
       const executionRunId = await api.executeAgent(agent.id!, projectPath, task, model);
       console.log("Agent execution started with run ID:", executionRunId);
       setRunId(executionRunId);
+
+      // Add initial system message
+      setMessages([{
+        type: "system",
+        subtype: "init",
+        session_id: `agent-${executionRunId}`,
+        model: model === 'opus' ? 'claude-3-opus' : 'claude-3-sonnet',
+        cwd: projectPath,
+        tools: ["edit", "read", "write", "bash", "grep"],
+        content: `🚀 Starting Agent Execution\n\n` +
+                `**Agent:** ${agent.name}\n` +
+                `**Task:** ${task}\n` +
+                `**Working Directory:** ${projectPath}\n` +
+                `**Model:** ${model === 'opus' ? 'Claude 4 Opus' : 'Claude 4 Sonnet'}\n` +
+                `**Run ID:** ${executionRunId}\n\n` +
+                `Connecting to Claude Code...`
+      }]);
+        
+      // Set up EventSource for real-time output
+      const eventSource = api.createAgentStream(executionRunId);
       
-      // Set up event listeners with run ID isolation
-      const outputUnlisten = await listen<string>(`agent-output:${executionRunId}`, (event) => {
+      eventSource.onmessage = (event) => {
         try {
-          // Store raw JSONL
-          setRawJsonlOutput(prev => [...prev, event.payload]);
+          const data = JSON.parse(event.data);
           
-          // Parse and display
-          const message = JSON.parse(event.payload) as ClaudeStreamMessage;
-          setMessages(prev => [...prev, message]);
+          if (data.type === 'status') {
+            // Handle status updates
+            setIsRunning(data.status === 'running');
+            if (data.status !== 'running') {
+              setExecutionStartTime(null);
+              
+              // Add completion message
+              setMessages(prev => [...prev, {
+                type: "result",
+                subtype: "execution_complete",
+                result: `✅ Agent execution ${data.status}\n\n` +
+                        `**Duration:** ${data.duration ? Math.round(data.duration / 1000) : 0}s\n` +
+                        `**Exit Code:** ${data.exitCode || 0}`,
+                duration_ms: data.duration || 0,
+                usage: {
+                  input_tokens: 0,
+                  output_tokens: 0
+                }
+              }]);
+            }
+          } else if (data.type === 'stdout') {
+            // Handle Claude Code output
+            const output = data.data;
+            setRawJsonlOutput(prev => [...prev, output]);
+            
+            // Try to parse as JSONL messages
+            const lines = output.split('\n').filter((line: string) => line.trim());
+            for (const line: string of lines) {
+              try {
+                const message = JSON.parse(line) as ClaudeStreamMessage;
+                setMessages(prev => [...prev, message]);
+              } catch {
+                // If not valid JSON, add as raw text
+                setMessages(prev => [...prev, {
+                  type: "result",
+                  subtype: "output",
+                  result: line,
+                  timestamp: Date.now()
+                }]);
+              }
+            }
+          } else if (data.type === 'stderr') {
+            // Handle errors
+            console.error("Agent stderr:", data.data);
+            setError(data.data);
+          }
         } catch (err) {
-          console.error("Failed to parse message:", err, event.payload);
+          console.error("Failed to parse EventSource data:", err, event.data);
         }
-      });
+      };
 
-      const errorUnlisten = await listen<string>(`agent-error:${executionRunId}`, (event) => {
-        console.error("Agent error:", event.payload);
-        setError(event.payload);
-      });
-
-      const completeUnlisten = await listen<boolean>(`agent-complete:${executionRunId}`, (event) => {
+      eventSource.onerror = (error) => {
+        console.error("EventSource error:", error);
         setIsRunning(false);
         setExecutionStartTime(null);
-        if (!event.payload) {
-          setError("Agent execution failed");
-        }
-      });
+        setError("Connection to agent stream lost");
+      };
 
-      const cancelUnlisten = await listen<boolean>(`agent-cancelled:${executionRunId}`, () => {
-        setIsRunning(false);
-        setExecutionStartTime(null);
-        setError("Agent execution was cancelled");
-      });
-
-      unlistenRefs.current = [outputUnlisten, errorUnlisten, completeUnlisten, cancelUnlisten];
+      // Store cleanup function
+      unlistenRefs.current = [() => eventSource.close()];
     } catch (err) {
       console.error("Failed to execute agent:", err);
       setIsRunning(false);
@@ -935,5 +994,4 @@ export const AgentExecution: React.FC<AgentExecutionProps> = ({
   );
 };
 
-// Import AGENT_ICONS for icon rendering
-import { AGENT_ICONS } from "./CCAgents";
+
